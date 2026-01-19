@@ -31,28 +31,39 @@ reader = easyocr.Reader(['th', 'en'], gpu=False)
 # =================================================
 
 def login_instaloader():
-    """ระบบ Login แบบปลอดภัย + ลบ Session เสียอัตโนมัติ"""
+    """ระบบ Login แบบ Smart Session (แก้ 401 และ Rate Limit)"""
     L = instaloader.Instaloader()
     
-    # พยายามโหลด Session เก่าก่อน
+    # ชื่อไฟล์เก็บประวัติการเข้าสู่ระบบ
     session_file = f"session-{IG_USER}"
     
-    # ถ้ามีไฟล์ Session เก่า ให้ลองลบทิ้งก่อน เพื่อเริ่มใหม่แบบคลีนๆ (แก้ 401)
+    logged_in = False
+
+    # 1. ลองโหลด Session เก่าก่อน (เพื่อจะได้ไม่ต้อง Login ใหม่ให้ IG สงสัย)
     if os.path.exists(session_file):
         try:
-            os.remove(session_file)
-            print(" > (Auto-Fix) ลบ Session เก่าทิ้งเพื่อป้องกัน Error ค้าง")
-        except:
-            pass
+            print(f" > กำลังโหลด Session จากไฟล์ {session_file}...")
+            L.load_session_from_file(IG_USER, filename=session_file)
+            logged_in = True
+            print(" > โหลด Session สำเร็จ! (พร้อมใช้งาน)")
+        except Exception as e:
+            print(f" ! Session เดิมหมดอายุหรือใช้ไม่ได้ ({e}) - จำเป็นต้อง Login ใหม่")
 
-    try:
-        print(f" > กำลัง Login เข้าบัญชี {IG_USER}...")
-        L.login(IG_USER, IG_PASS)
-        print(" > Login สำเร็จ!")
-    except Exception as e:
-        print(f" ! Login ไม่ผ่าน: {e}")
-        print("   (คำแนะนำ: หยุดรัน, เข้าแอป IG ไปกดยืนยันตัวตน, รอ 1 ชม. แล้วลองใหม่)")
-        return None
+    # 2. ถ้าโหลดไม่ได้ ค่อย Login ใหม่
+    if not logged_in:
+        try:
+            print(f" > กำลัง Login เข้าบัญชี {IG_USER} (Password)...")
+            L.login(IG_USER, IG_PASS)
+            print(" > Login สำเร็จ!")
+            
+            # Login ผ่านแล้ว ให้บันทึก Session ไว้ใช้รอบหน้า
+            L.save_session_to_file(filename=session_file)
+            print(" > บันทึก Session ไฟล์เรียบร้อยแล้ว")
+            
+        except Exception as e:
+            print(f" ! Login ไม่ผ่าน: {e}")
+            print("   (คำแนะนำ: หยุดรัน 1 วัน, เข้ามือถือไปกดยืนยันตัวตน)")
+            return None
         
     return L
 
