@@ -1,244 +1,174 @@
-import instaloader
-import easyocr
-import schedule
-import time
 import os
 import shutil
 import re
-from datetime import datetime
+import random
+import time
+import easyocr
+from instagrapi import Client
 
 # ================= CONFIGURATION =================
-# ⚠️ ใส่ User/Pass IG ของคุณที่นี่
 IG_USER = "ryukul0032"
 IG_PASS = "XsoEllsJ001" 
 
 TARGET_PROFILES = [
-    "meanband", 
-    "slapkiss.official", 
-    "pun___official", 
-    "zentyarb", 
-    "urboytj", 
-    "guncharlieee",
-    "diamond.mqt"
+    "meanband", "slapkiss.official", "pun___official", 
+    "zentyarb", "urboytj", "guncharlieee", "diamond.mqt"
 ]
 
-# คำค้นหา (Keywords)
 KEYWORDS = ["ตาราง", "schedule", "lineup", "งาน", "tour", "january", "february", "jan", "feb", "มีนา", "เมษา", "april", "march"] 
-OUTPUT_FILE = "artist_schedule.txt"
+OUTPUT_FILE = "artist_schedule_mobile.txt"
 
 print("กำลังโหลดโมเดล EasyOCR...")
-reader = easyocr.Reader(['th', 'en'], gpu=False) 
-# =================================================
+reader = easyocr.Reader(['th', 'en'], gpu=False)
 
-def login_instaloader():
-    """ระบบ Login แบบ Smart Session (แก้ 401 และ Rate Limit)"""
-    L = instaloader.Instaloader()
-    
-    # ชื่อไฟล์เก็บประวัติการเข้าสู่ระบบ
-    session_file = f"session-{IG_USER}"
-    
-    logged_in = False
+# ================= SYSTEM FUNCTIONS =================
 
-    # 1. ลองโหลด Session เก่าก่อน (เพื่อจะได้ไม่ต้อง Login ใหม่ให้ IG สงสัย)
-    if os.path.exists(session_file):
-        try:
-            print(f" > กำลังโหลด Session จากไฟล์ {session_file}...")
-            L.load_session_from_file(IG_USER, filename=session_file)
-            logged_in = True
-            print(" > โหลด Session สำเร็จ! (พร้อมใช้งาน)")
-        except Exception as e:
-            print(f" ! Session เดิมหมดอายุหรือใช้ไม่ได้ ({e}) - จำเป็นต้อง Login ใหม่")
-
-    # 2. ถ้าโหลดไม่ได้ ค่อย Login ใหม่
-    if not logged_in:
-        try:
-            print(f" > กำลัง Login เข้าบัญชี {IG_USER} (Password)...")
-            L.login(IG_USER, IG_PASS)
-            print(" > Login สำเร็จ!")
-            
-            # Login ผ่านแล้ว ให้บันทึก Session ไว้ใช้รอบหน้า
-            L.save_session_to_file(filename=session_file)
-            print(" > บันทึก Session ไฟล์เรียบร้อยแล้ว")
-            
-        except Exception as e:
-            print(f" ! Login ไม่ผ่าน: {e}")
-            print("   (คำแนะนำ: หยุดรัน 1 วัน, เข้ามือถือไปกดยืนยันตัวตน)")
-            return None
-        
-    return L
-
-def extract_schedule_columns(image_path):
-    """ฟังก์ชันอ่านตารางงานแบบหลายคอลัมน์ (Smart Coordinate System)"""
-    try:
-        results = reader.readtext(image_path)
+def extract_text_from_image(image_path):
+    """แกะตัวหนังสือจากภาพ"""
+    try: results = reader.readtext(image_path)
     except: return "Error reading image"
-
-    dates_found = []
     
-    # 1. หาตัวเลขวันที่ (Anchor)
+    dates_found = []
     for (bbox, text, prob) in results:
         clean_text = re.sub(r'\D', '', text)
-        # กรองเอาเฉพาะตัวเลข 1-2 หลัก ที่มั่นใจเกิน 40%
         if clean_text.isdigit() and 1 <= len(clean_text) <= 2 and prob > 0.4:
             (tl, tr, br, bl) = bbox
-            y_center = (tl[1] + bl[1]) / 2
-            x_right = tr[0]
-            dates_found.append({'num': int(clean_text), 'y': y_center, 'x': x_right, 'detail': []})
+            dates_found.append({'num': int(clean_text), 'y': (tl[1]+bl[1])/2, 'x': tr[0], 'detail': []})
 
-    if not dates_found: return "ไม่พบตัวเลขวันที่ในภาพ (อาจเป็นเพราะฟอนต์อ่านยาก)"
+    if not dates_found: return "ไม่พบตัวเลขวันที่"
 
-    # 2. จับคู่ข้อความกับวันที่ (Nearest Neighbor Logic)
     for (bbox, text, prob) in results:
-        # ข้ามตัวที่เป็นตัวเลขวันที่ไป
         if re.sub(r'\D', '', text).isdigit() and len(re.sub(r'\D', '', text)) <= 2: continue
-        
         (tl, tr, br, bl) = bbox
-        y = (tl[1] + bl[1]) / 2
-        x = tl[0]
-
-        best_match = None
-        min_dist_x = 10000
-
-        for d in dates_found:
-            # กฏ 1: ต้องอยู่บรรทัดเดียวกัน (แกน Y ห่างกันไม่เกิน 50px)
-            if abs(d['y'] - y) < 50:
-                # กฏ 2: ข้อความต้องอยู่ทางขวาของวันที่ (ค่า X มากกว่า)
-                dist_x = x - d['x']
-                if dist_x > 0 and dist_x < min_dist_x:
-                    min_dist_x = dist_x
-                    best_match = d
+        y, x = (tl[1]+bl[1])/2, tl[0]
         
+        best_match = None; min_dist_x = 10000
+        for d in dates_found:
+            if abs(d['y'] - y) < 50:
+                dist_x = x - d['x']
+                if 0 < dist_x < min_dist_x: min_dist_x = dist_x; best_match = d
         if best_match: best_match['detail'].append(text)
 
-    # 3. เรียงตามวันที่ 1-31
     dates_found.sort(key=lambda k: k['num'])
-    
-    # จัดรูปแบบข้อความ Output
-    final_output = []
-    for d in dates_found:
-        if d['detail']:
-            row_text = f"วันที่ {d['num']} - {' '.join(d['detail'])}"
-            final_output.append(row_text)
-            
-    if not final_output:
-        return "อ่านข้อมูลดิบ (จับคู่ไม่ได้):\n" + " ".join([r[1] for r in results])
-        
+    final_output = [f"วันที่ {d['num']} - {' '.join(d['detail'])}" for d in dates_found if d['detail']]
     return "\n".join(final_output)
 
-def process_image_and_save(target_dir, artist, date_ref, source_type):
-    image_path = find_image_in_folder(target_dir)
-    if image_path:
-        print(f"   - พบรูปจาก {source_type}! กำลังแกะข้อมูล...")
-        text = extract_schedule_columns(image_path)
-        save_schedule_to_file(artist, date_ref, text, f"Source: {source_type}")
-        print("   - บันทึกสำเร็จ!")
-        cleanup(target_dir)
-        return True
-    return False
-
-def check_highlights(L, artist):
-    """เช็คไฮไลท์แบบปลอดภัย (กัน Error เวอร์ชันเก่า)"""
-    print(f"   - กำลังเช็ค Highlights ของ {artist}...")
+def get_latest_posts_raw(cl, user_id, amount=3):
+    """
+    ดึงข้อมูลดิบโดยไม่ผ่าน Pydantic Validation (แก้บั๊ก Crash)
+    """
+    posts = []
     try:
-        profile = instaloader.Profile.from_username(L.context, artist)
+        # ยิง Request ไปที่ API มือถือโดยตรง
+        resp = cl.private_request(f"feed/user/{user_id}/")
+        items = resp.get("items", [])
         
-        # เช็คว่าเวอร์ชันนี้รองรับ highlights ไหม
-        if not hasattr(profile, 'get_highlights'):
-            print("     ! Instaloader เวอร์ชันนี้ไม่รองรับ Highlights (กรุณาอัปเดต: pip install -U instaloader)")
-            return False
-
-        for highlight in profile.get_highlights():
-            if any(k in highlight.title.lower() for k in KEYWORDS):
-                print(f"     > เจอไฮไลท์ชื่อ: {highlight.title}")
-                items = list(highlight.get_items())
-                if items:
-                    # เอา item ล่าสุดในไฮไลท์นั้น
-                    target_item = items[-1] 
-                    print(f"     > โหลดรูปไฮไลท์ ({target_item.date_local})...")
-                    
-                    if is_already_saved(target_item.date_local, artist):
-                        print("       - ข้อมูลนี้มีแล้ว ข้าม...")
-                        continue
-
-                    temp_dir = f"temp_hl_{artist}"
-                    L.download_storyitem(target_item, target=temp_dir)
-                    
-                    if process_image_and_save(temp_dir, artist, target_item.date_local, f"Highlight: {highlight.title}"):
-                        return True 
+        for item in items[:amount]:
+            # แกะข้อมูลเองด้วยมือ (ปลอดภัยกว่า)
+            pk = item.get("pk")
+            code = item.get("code")
+            taken_at = item.get("taken_at")
+            
+            # หา Caption
+            caption_text = ""
+            if item.get("caption"):
+                caption_text = item["caption"].get("text", "")
+            
+            # หา URL รูปภาพ (รองรับทั้งรูปเดี่ยวและอัลบั้ม)
+            image_url = None
+            if "image_versions2" in item:
+                candidates = item["image_versions2"].get("candidates", [])
+                if candidates:
+                    image_url = candidates[0].get("url")
+            elif "carousel_media" in item: # กรณีเป็นอัลบั้ม
+                if item["carousel_media"]:
+                     candidates = item["carousel_media"][0]["image_versions2"].get("candidates", [])
+                     if candidates:
+                        image_url = candidates[0].get("url")
+            
+            if pk and image_url:
+                posts.append({
+                    "pk": pk,
+                    "code": code,
+                    "taken_at": taken_at,
+                    "caption_text": caption_text,
+                    "image_url": image_url
+                })
     except Exception as e:
-        print(f"     ! ข้าม Highlight ({e})")
-    return False
+        print(f"⚠️ Error fetching raw posts: {e}")
+        
+    return posts
 
-def job():
-    print(f"\n[{datetime.now()}] เริ่มงาน...")
-    L = login_instaloader()
+def main():
+    print("🚀 เริ่มทำงาน (Mode: Mobile API - Raw Fetch)...")
+    cl = Client()
+    cl.delay_range = [2, 5]
     
-    if not L: 
-        print(" ! จบการทำงานรอบนี้เพราะ Login ไม่ได้")
+    # 1. Login
+    print(f"🔑 กำลัง Login เข้าบัญชี {IG_USER}...")
+    try:
+        cl.login(IG_USER, IG_PASS)
+        print("✅ Login สำเร็จ!")
+    except Exception as e:
+        print(f"❌ Login ไม่ผ่าน: {e}")
         return
 
+    # 2. เริ่มวนลูปศิลปิน
     for artist in TARGET_PROFILES:
         print(f"\n--- {artist} ---")
-        
-        # 1. ลองเช็ค Highlight ก่อน
-        if check_highlights(L, artist):
-            continue 
-
-        # 2. ถ้าไม่เจอ ค่อยเช็ค Post
-        print(f"   - เช็ค Post ล่าสุด...")
         try:
-            profile = instaloader.Profile.from_username(L.context, artist)
-            count = 0
-            for post in profile.get_posts():
-                if count >= 3: break
+            user_id = cl.user_id_from_username(artist)
+            print(f"   > User ID: {user_id}")
+            
+            # ใช้ฟังก์ชันดึงดิบแทนฟังก์ชันมาตรฐาน
+            medias = get_latest_posts_raw(cl, user_id, amount=3)
+            
+            for i, media in enumerate(medias):
+                caption_text = media["caption_text"].lower()
                 
-                caption = post.caption if post.caption else ""
-                if any(w in caption.lower() for w in KEYWORDS):
-                    print(f"     > เจอ Post วันที่ {post.date_local}")
+                if any(k in caption_text for k in KEYWORDS):
+                    print(f"     > 📅 เจอโพสต์ (ID: {media['pk']})")
                     
-                    if is_already_saved(post.date_local, artist):
-                        count += 1; continue
+                    temp_path = f"temp_{artist}_{i}.jpg"
                     
-                    temp_dir = f"temp_post_{artist}"
-                    L.download_post(post, target=temp_dir)
+                    # โหลดรูปจาก URL โดยตรง (ใช้ download helper ของ cl ก็ได้แต่นี่ชัวร์กว่า)
+                    print("       📥 กำลังโหลดรูป...")
+                    cl.photo_download(int(media['pk']), folder=".")
                     
-                    if process_image_and_save(temp_dir, artist, post.date_local, "Post"):
-                        break
-                count += 1
+                    # หาไฟล์ที่เพิ่งโหลดมา (instagrapi ชอบตั้งชื่อไฟล์ยาวๆ)
+                    # เราจะ Rename ให้เป็นชื่อที่เราต้องการ
+                    for f in os.listdir("."):
+                        if f.endswith(".jpg") and str(media['pk']) in f:
+                            # ลบไฟล์เก่าถ้ามี
+                            if os.path.exists(temp_path): os.remove(temp_path)
+                            os.rename(f, temp_path)
+                            break
+                    
+                    if not os.path.exists(temp_path):
+                        print("       ❌ หาไฟล์รูปไม่เจอ ข้าม...")
+                        continue
+
+                    # ส่งไปแกะ OCR
+                    print("       📖 กำลังแกะข้อมูล...")
+                    text = extract_text_from_image(temp_path)
+                    
+                    link = f"https://www.instagram.com/p/{media['code']}/"
+                    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+                        f.write(f"\n{'='*40}\nศิลปิน: {artist}\nลิงก์: {link}\nที่มา: Mobile API (Raw)\n{'-'*20}\n{text}\n{'='*40}\n")
+                    
+                    print("       ✅ บันทึกเสร็จเรียบร้อย!")
+                    
+                    if os.path.exists(temp_path): os.remove(temp_path)
+                    break 
+                
+            s = random.randint(5, 10)
+            print(f"   - 💤 พัก {s} วินาที...")
+            time.sleep(s)
+
         except Exception as e:
-            print(f"     ! Error เช็ค Post: {e}")
-            if "401" in str(e):
-                print("     !!! เจอ 401 Unauthorized - พักระบบ 2 นาที...")
-                time.sleep(120)
-        
-        # พัก 10 วินาทีระหว่างเปลี่ยนศิลปิน เพื่อลดความเสี่ยงโดนแบน
-        time.sleep(10) 
+            print(f"   ❌ ข้าม {artist}: {e}")
 
-def cleanup(d): 
-    try: shutil.rmtree(d) 
-    except: pass
-
-def find_image_in_folder(d):
-    if not os.path.exists(d): return None
-    for r, _, f in os.walk(d):
-        for file in f:
-            if file.endswith(".jpg"): return os.path.join(r, file)
-    return None
-
-def is_already_saved(d, a):
-    if not os.path.exists(OUTPUT_FILE): return False
-    with open(OUTPUT_FILE,"r",encoding="utf-8") as f: 
-        content = f.read()
-        return (str(d) in content and a.upper() in content)
-
-def save_schedule_to_file(artist, date, text, src):
-    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*50}\nศิลปิน: {artist.upper()}\nวันที่: {date}\nที่มา: {src}\n{'-'*20}\n{text}\n{'='*50}\n")
+    print("\n🏁 จบการทำงาน")
 
 if __name__ == "__main__":
-    job()
-    # ตั้งเวลาเช็คทุกๆ 6 ชั่วโมง
-    schedule.every(6).hours.do(job) 
-    while True: 
-        schedule.run_pending()
-        time.sleep(60)
+    main()
